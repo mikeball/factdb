@@ -2,22 +2,78 @@ Poor man’s datomic. Target use case: smallish business apps.
 * focus is on fact storage and retrieval. Summarization is outside of scope.
 
 
+So Datomic is just so very heavy weight, it's total overkill for small apps,
+and especially for microservices. It's almost the antithesis of microservices.
+But the logical model is just so much more correct than anything else. How to resolve this?
+  What if we had "micro-peers" that where micro-peer stored only the data related
+to a single unit of code. For instance take a list of products, could there not be
+a micro-peer for just the list of products that was sort of similar to the full datomic
+peer, but it uses a snapshot of a point in time + changes afterwards. So would a product detail
+function from a micro-peer that cached all products details?
+
+
+
 
 
 In general how to handle schema migrations?
 Especially how to handle schema data type change?
   From string to int?
-
+  What should happen in query that returns a property that has facts both before and after a type change?
+  * need to learn from Rich's thoughts on clojure.spec name changes especially cognitect podcast on it.
 
 Could/should we push out a change notification via pg-notify?
 
 https://news.ycombinator.com/item?id=10316872&utm_source=postgresweekly&utm_medium=email
 
 
+
+What if a column schema allowed a list of allowed types for a given property?
+  for instance a property storing a rate could be positive rate or negative rate type
+  might also allow to say we know a person has a middle name but it's currently unknown
+  or might be able to say middle name could be name(text), has-no-name or unknown.
+    for unknown you might ask to complete complete middle name data
+    or might be able to say it's a US name or a complex name type from other country.
+
+### Application Usage Models ###
+
+#1 - perform a query with results as of current point in time,
+then be notified of changes to said query.
+
+-- so this is initial query+result+changes called a query feed? query plug?
+-- clients can plug into the query plug.
+
+where product/category = 11
+    select product/name
+           category/name
+
+
+-- we have issues with the push... we need to know the id of the sub entity id's
+-- in order to merge the data remotely.
+-- so how about by default the id is always included in results for each property namespace.
+
+-- so for this initial query feed
+
+[{product/id: 1  product/name:"product a" category/id: 3 category/name: "category a"}
+ {product/id: 2  product/name:"product b" category/id: 3 category/name: "category a"}]
+
+-- so now if the category id 3 has it's category/name updated a change-set is triggered
+[where-properties new-values]
+[{category/id: 3} {category/name "category aa"}]
+
+-- which is then merged into the updated result-set
+[{product/id: 1  product/name:"product a" category/id: 3 category/name: "category aa"}}
+ {product/id: 2  product/name:"product b" category/id: 3 category/name: "category aa"}]
+
+
+
+
+
+
 # Name ###
 postfact
 factomatic
-datom-pg
+fatomic
+mea - hawaiian for fact
 
 
 
@@ -41,7 +97,7 @@ So, if the query engine knows the type of an attribute, it can query the correct
 
 #2 suppose we could also union the different tables into a sparse column result set...
 
-#3 Table Inheritance with different queries.. Seems more attractive?
+#3 Table Inheritance with different queries.. Seems most attractive.
 
 facts (fid,tid,eid,pid)
 facts_int (value)
@@ -49,10 +105,13 @@ facts_text (value)
 facts_datetime (value)
 
 
-Pretty sure we would need to send multiple queries for each prop type to db, then combine the results in the driver. Also don't forget result reading is highly dependant on ordering of items.
+-- Pretty sure we would need to send multiple queries for each prop type to db,
+-- then combine the results in the driver. Also don't forget result reading
+-- is dependent on ordering of items.
+-- also don't forget that we need to view the different queries as-of a single point in time
 
 
-# http://stackoverflow.com/questions/8909069/storing-varying-data-types-in-a-postgresql-database
+-- http://stackoverflow.com/questions/8909069/storing-varying-data-types-in-a-postgresql-database
 
 
 
@@ -84,14 +143,59 @@ where product/category = 11
 # what about a list containing both category and product information?
 # should this even be allowed?
 where product/category
-    select category/name
-           entity/id,       (* products entity/id)
+    select entity/id,       (* products entity/id)
            product/name
+           category/name
 
 # could this be accomplished at app level...
 #   - pull & cache categories facts desired
 #   - pull products list
 # name of the category is pulled from cache.
+
+
+********************************
+# so from this query
+where product/category = 3
+    select product/name category/name
+
+# so we need this
+[{product/id: 1  product/name:"product a" category/id: 3 category/name: "category a"}
+ {product/id: 2  product/name:"product b" category/id: 3 category/name: "category a"}]
+
+# how to do this given product/category = 3
+- join back onto entities->properties?
+
+create table properties ( -- should this be called attributes?
+    pid bigint DEFAULT nextval('serial') primary key not null,
+    type text not null,
+    name text not null );
+
+create table entities (
+    eid bigint DEFAULT nextval('serial') primary key not null,
+    meta text not null );
+
+create table current_facts (
+    cfid bigint DEFAULT nextval('serial') primary key not null,
+    eid bigint not null references entities,
+    pid bigint not null references properties );
+
+create table current_facts_text ( value text not null ) inherits (current_facts);
+
+- get the property id and datatype for the product/category property
+- get list of entity id's that have a property with the product/category value
+- get all properties for the list of entities
+
+$pid = 44
+select *
+  from current_facts_int cfi
+  where cfi.pid = product/category
+    and cfi.value = 3
+
+
+to be continued... the rabbit hole is deep, this one is.
+***************************************
+
+
 
 
 
@@ -176,6 +280,7 @@ on new assert
 # upsert syntax?
 # Is upsert even necessary because at the core if you state a fact that is
 # the same as it presently is, shouldn't it just be ignored?
+# probably need a re-assert statement
 on id=101 else new assert
     user/name = `bob`
 
@@ -194,6 +299,8 @@ on id = 101 retract
 on id = 101 excise
   person/name
 
+  on id = 101 forget
+    person/name
 
 
 
