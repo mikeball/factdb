@@ -1,0 +1,310 @@
+Poor man’s datomic. Target use case: smallish business apps.
+* focus is on fact storage and retrieval. Summarization is outside of scope.
+
+
+
+Should assertation of an existing fact be ignored?
+There should be a way to re-assert a fact, where when re-asserted it's recorded in the database that it's true at that point in time once again.
+
+
+http://aosabook.org/en/500L/an-archaeology-inspired-database.html
+
+
+This is a good video about a poor experience with datomic, and interesting points on how datomic didn't work for them. https://www.youtube.com/watch?v=0y6QK813new
+
+Most interesting to me is how datomics fully immutable history caused real problems with application development when the schema evolved. The application needed to support both the old schema and the new schema. This brings up a thought that perhaps there should be a split between the "system" history and the "domain" history. For instance if the schema changes, then we need the ability to modify past facts to match the new schema, but not change the "domain" fact itself. I guess you could say we need the ability to update the representation of the fact in the database to match "application/system" level changes.
+
+
+
+
+Have a look at this
+https://hashrocket.com/blog/posts/modeling-polymorphic-associations-in-a-relational-database?utm_source=postgresweekly&utm_medium=email
+
+
+
+
+So Datomic is just so very heavy weight, it's total overkill for small apps,
+and especially for microservices. It's almost the antithesis of microservices.
+But the logical model is just so much more correct than anything else. How to resolve this?
+  What if we had "micro-peers" that where micro-peer stored only the data related
+to a single unit of code. For instance take a list of products, could there not be
+a micro-peer for just the list of products that was sort of similar to the full datomic
+peer, but it uses a snapshot of a point in time + changes afterwards. So would a product detail
+function from a micro-peer that cached all products details?
+
+Or perhaps call it a connected micro collection... basically many small lists in an application that are hooked up to changes pushed from the database. Detail pages always pull latest from server to avoid caching too much locally.
+
+
+
+In general how to handle schema migrations?
+Especially how to handle schema data type change?
+  From string to int?
+  What should happen in query that returns a property that has facts both before and after a type change?
+
+  I'm now leaning towards allowing changing past "facts" to a different represention.. it doesn't change the "fact" as it is know in the system, just how it represented. I suppose there could be loss of precision from the past. But for over-all good of evolution of the data model, this is probably fine as long as it's understood.
+
+
+What about fact re-names?
+  what would happen if a browser had some facts in memory while a deploy occured?
+
+
+
+
+Could/should we push out a change notification via pg-notify?
+
+https://news.ycombinator.com/item?id=10316872&utm_source=postgresweekly&utm_medium=email
+
+
+
+What if a column schema allowed a list of allowed types for a given property?
+  for instance a property storing a rate could be positive rate or negative rate type
+  might also allow to say we know a person has a middle name but it's currently unknown
+  or might be able to say middle name could be name(text), has-no-name or unknown.
+    for unknown you might ask to complete complete middle name data
+    or might be able to say it's a US name or a complex name type from other country.
+
+
+
+
+
+
+
+# Name ###
+postfact
+mea - hawaiian for fact
+
+
+
+### numbering/identity ###
+Using a single sequence so that every table PK is
+a time sequenced gives us the ability to query the state of something,
+then also get all facts/retractions that have occured
+after that initial point in time state.
+
+done.
+
+
+
+
+
+### datatypes ###
+
+So, if the query engine knows the type of an attribute, it can query the correct column or table.
+
+#1 Sparse columns might not have issues with concurrency that come up with table inheritance?
+
+#2 suppose we could also union the different tables into a sparse column result set...
+
+#3 Table Inheritance with different queries.. Seems most attractive.
+
+facts (fid,tid,eid,pid)
+facts_int (value)
+facts_text (value)
+facts_datetime (value)
+
+
+-- Pretty sure we would need to send multiple queries for each prop type to db,
+-- then combine the results in the driver. Also don't forget result reading
+-- is dependent on ordering of items.
+-- also don't forget that we need to view the different queries as-of a single point in time?
+
+
+-- http://stackoverflow.com/questions/8909069/storing-varying-data-types-in-a-postgresql-database
+
+
+
+
+
+### Relationships ###
+
+# belongs too... for example product belongs to a category
+
+so category has entity id 11, attribute category/name which is a string
+    product/category is a property
+        that's an integer?
+        that's an entity/id  (this is datomic's choice)
+        that's an entity/id where it's a also a category?
+
+
+let's create a new product in that category
+
+on new assert
+  product/category = 11
+  product/name = `harness`
+
+# let's select a list of products in that category
+where product/category = 11
+    select entity/id,
+           product/name
+
+
+# what about a list containing both category and product information?
+# should this even be allowed?
+where product/category
+    select entity/id,       (* products entity/id)
+           product/name
+           category/name
+
+# could this be accomplished at app level...
+#   - pull & cache categories facts desired
+#   - pull products list
+# name of the category is pulled from cache.
+
+
+********************************
+# so from this query
+where product/category = 3
+    select product/name category/name
+
+# so we need this
+[{product/id: 1  product/name:"product a" category/id: 3 category/name: "category a"}
+ {product/id: 2  product/name:"product b" category/id: 3 category/name: "category a"}]
+
+# how to do this given product/category = 3
+- join back onto entities->properties?
+
+create table properties ( -- should this be called attributes?
+    pid bigint DEFAULT nextval('serial') primary key not null,
+    type text not null,
+    name text not null );
+
+create table entities (
+    eid bigint DEFAULT nextval('serial') primary key not null,
+    meta text not null );
+
+create table current_facts (
+    cfid bigint DEFAULT nextval('serial') primary key not null,
+    eid bigint not null references entities,
+    pid bigint not null references properties );
+
+create table current_facts_text ( value text not null ) inherits (current_facts);
+
+- get the property id and datatype for the product/category property
+- get list of entity id's that have a property with the product/category value
+- get all properties for the list of entities
+
+$pid = 44
+select *
+  from current_facts_int cfi
+  where cfi.pid = product/category
+    and cfi.value = 3
+
+
+to be continued...
+
+
+
+
+
+
+solution a: so let's say we take a map/reduce angle on the joining..
+
+get a list of the matching entities
+  where there is a joining attribute... 
+    get a list of all unique id's from the primary result set
+      with only necessary attributes
+    then query database for this list of joined entities + attributues
+    then map/reduce the appropiate attributes into the primary enties
+
+* so this is a bit chatty with the database, but if the database
+is all in memory and database sizes aren't too large it might work.
+
+* this eventually would want to be a pg extension/module I think.
+
+* perhaps applications could be designed to not require as much redundant
+reselection of data as well... for instance when viewing a list rather than
+a full requery, it keeps the local results cached.
+
+
+
+
+
+
+
+
+
+***************************************
+
+
+
+
+
+
+
+
+
+
+# for many to many, create a relationship entity
+on new assert
+    product-category/category = 11
+    product-category/product = 22
+
+
+# to query list of products in a category then? ohy vey.
+# how about some sort of join? implicitly on entity id ?
+
+where product-category/category = 11
+    join product-category/product
+    select product-category/product
+           entity/id                   (* the products entity id!)
+           product/name
+
+
+
+One to One? (eg biological mother)
+
+
+
+
+
+### Schema Migrations ###
+
+How the heck to handle schema rule changes?
+  simple addition of row to the properties table?
+
+What about when an attribute goes from optional to required?
+  does required have any meaning if we don't have "entity" type rules?
+
+How to remove a property from database?
+  mark property as removed?
+  I guess assert needs to look up property on assert?
+  can you retract a fact on a removed property?
+  what if you re-add the same property name at later point in time?
+
+https://news.ycombinator.com/item?id=10145933
+
+
+
+
+
+
+
+
+
+
+
+# Should entities have type?
+ Tables serve this function in sql. should there be rules around what compromises an entity?
+ Datomic has no concept of entity type rules, just collection of attributes with rules about each attribute.
+
+related
+    http://kevinmahoney.co.uk/articles/log-orientated-data/
+    http://docs.datomic.com/best-practices.html
+
+
+
+# How to assert negatives / unknowns?
+
+
+
+
+
+# Implementation Ideas
+* Given the need for the client to see almost all data grouped by entity, might it make sense to use a sparse fill factor and cluster on entity id? This would be rather than clustering on a sequnce id as primary key.
+
+* Look into use of BRIN indexes for keys,
+    not as fast as BTREE but dramatically less space usage for large amounts of data
+
+
+
+http://dba.stackexchange.com/questions/20759/is-there-a-name-for-this-database-structure/20763

@@ -23,18 +23,26 @@ CREATE SEQUENCE serial START 1;
 create table properties ( -- should this be called attributes?
     pid bigint DEFAULT nextval('serial') primary key not null,
     type text not null,
+
+    -- should the property namespace be an entity type?
+    -- rather than being a prefix portion of a string?
+    -- entity_type_id int not null?
+    -- or perhaps called context? namespace?
     name text not null
 );
 
+-- do we need an entity_types table?
+
 create table entities (
     eid bigint DEFAULT nextval('serial') primary key not null,
+    type text not null, -- potenially an array of names?
     meta text not null
 );
 
 create table transactions (
     tid bigint DEFAULT nextval('serial') primary key not null,
     -- system_time    when a fact was recorded
-    -- actual_time    when a fact was actually known, created, or happened
+    -- domain_time    when a fact was actually known, created, or happened
     meta text not null
 );
 
